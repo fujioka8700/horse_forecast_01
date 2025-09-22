@@ -131,12 +131,12 @@ const scrapeAndSave = async () => {
         return nextButton ? nextButton.href : null;
       });
 
-      if (nextButtonHref) {
+      if (nextButtonHref && pageNum < 2) {
         console.log('Navigating to the next page...');
         await page.goto(nextButtonHref, { waitUntil: 'domcontentloaded', timeout: 90000 });
         pageNum++;
       } else {
-        console.log('No more pages to scrape. Finishing.');
+        console.log('No more pages to scrape or page limit reached. Finishing.');
         break;
       }
     }
