@@ -41,6 +41,12 @@ $ docker compose exec app bash
 $ docker compose down
 ```
 
+MongoDB クライアントを実行
+
+```bash
+$ docker compose exec db mongosh
+```
+
 本番環境で確認
 
 ```bash

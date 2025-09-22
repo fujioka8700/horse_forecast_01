@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "migrate-mongo": "^12.1.3",
     "mongoose": "^8.18.1",
     "next": "15.5.3",
     "react": "19.1.0",
