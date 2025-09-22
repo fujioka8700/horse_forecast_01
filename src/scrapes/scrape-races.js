@@ -1,72 +1,115 @@
 import puppeteer from 'puppeteer';
+import mongoose from 'mongoose';
+import dbConnect from '../lib/dbConnect.js';
+import Race from '../models/Race.js';
 
-(async () => {
-  const browser = await puppeteer.launch({
-    // Docker内で実行するための引数
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    // Chromiumの実行可能パスを指定
-    executablePath: '/usr/bin/chromium',
-  });
-  const page = await browser.newPage();
+const scrapeAndSave = async () => {
+  let browser;
+  try {
+    console.log('Launching browser...');
+    browser = await puppeteer.launch({
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      executablePath:
+        '/usr/bin/chromium' /** chromiumを使用するため、このコードは削除しない */,
+    });
+    const page = await browser.newPage();
 
-  // ユーザーエージェントを設定
-  await page.setUserAgent(
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-  );
-
-  await page.goto(
-    'https://db.netkeiba.com/?pid=race_list&word=&start_year=1975&start_mon=none&end_year=none&end_mon=none&kyori_min=&kyori_max=&sort=date&list=20',
-    { waitUntil: 'networkidle2', timeout: 60000 }, // タイムアウトを60秒に延長
-  );
-
-  // レースリストのテーブルが表示されるまで待機（タイムアウトを60秒に延長）
-  await page.waitForSelector('.nk_tb_common.race_table_01', { timeout: 60000 });
-
-  // evaluate内ではシリアライズ可能なデータのみを返す
-  const latestRaceData = await page.evaluate(() => {
-    const dataRow = document.querySelector(
-      '.nk_tb_common.race_table_01 tbody tr:nth-child(2)',
+    await page.setUserAgent(
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
     );
-    if (!dataRow) return null;
 
-    const columns = dataRow.querySelectorAll('td');
-    if (columns.length < 9) {
-      return null;
+    console.log('Navigating to page...');
+    await page.goto(
+      'https://db.netkeiba.com/?pid=race_list&word=&start_year=1975&start_mon=none&end_year=none&end_mon=none&kyori_min=&kyori_max=&sort=date&list=20',
+      { waitUntil: 'domcontentloaded', timeout: 90000 }, // 待機条件を変更し、タイムアウトを90秒に延長
+    );
+
+    console.log('Waiting for selector...');
+    await page.waitForSelector('.nk_tb_common.race_table_01', {
+      timeout: 60000,
+    });
+
+    console.log('Scraping data...');
+    const latestRaceData = await page.evaluate(() => {
+      const dataRow = document.querySelector(
+        '.nk_tb_common.race_table_01 tbody tr:nth-child(2)',
+      );
+      if (!dataRow) return null;
+
+      const columns = dataRow.querySelectorAll('td');
+      if (columns.length < 9) {
+        return null;
+      }
+
+      const raceLink = columns[4]?.querySelector('a');
+      const raceHref = raceLink ? raceLink.href : '';
+      const raceIdMatch = raceHref.match(/race\/(\d+)/);
+      const race_id = raceIdMatch ? raceIdMatch[1] : null;
+
+      const distanceStr = columns[6]?.innerText.trim();
+      const turf_or_dirt = distanceStr ? distanceStr.charAt(0) : null;
+      const distance = distanceStr
+        ? parseInt(distanceStr.substring(1), 10)
+        : null;
+
+      return {
+        race_id: race_id,
+        raw_date: columns[0]?.innerText.trim(),
+        course_name: columns[1]?.innerText
+          ? columns[1].innerText.trim() + '競馬場'
+          : null,
+        distance: distance,
+        turf_or_dirt: turf_or_dirt,
+        weather: columns[2]?.innerText.trim(),
+        track_condition: columns[8]?.innerText.trim(),
+      };
+    });
+
+    if (browser) {
+      await browser.close();
+      console.log('Browser closed.');
     }
 
-    const raceLink = columns[4]?.querySelector('a');
-    const raceHref = raceLink ? raceLink.href : '';
-    const raceIdMatch = raceHref.match(/race\/(\d+)/);
-    const race_id = raceIdMatch ? raceIdMatch[1] : null;
+    if (!latestRaceData || !latestRaceData.race_id) {
+      console.log('No race data found or race_id is missing.');
+      return;
+    }
 
-    const distanceStr = columns[6]?.innerText.trim();
-    const turf_or_dirt = distanceStr ? distanceStr.charAt(0) : null;
-    const distance = distanceStr
-      ? parseInt(distanceStr.substring(1), 10)
-      : null;
+    if (latestRaceData.raw_date) {
+      latestRaceData.race_date = new Date(
+        latestRaceData.raw_date.replace(/\//g, '-'),
+      );
+      delete latestRaceData.raw_date;
+    }
 
-    return {
-      race_id: race_id,
-      raw_date: columns[0]?.innerText.trim(), // 日付は文字列で返す
-      course_name: columns[1]?.innerText
-        ? columns[1].innerText.trim() + '競馬場'
-        : null,
-      distance: distance,
-      turf_or_dirt: turf_or_dirt,
-      weather: columns[2]?.innerText.trim(),
-      track_condition: columns[8]?.innerText.trim(),
-    };
-  });
+    console.log('Scraped race info:', latestRaceData);
 
-  // Node.js側でDateオブジェクトに変換
-  if (latestRaceData && latestRaceData.raw_date) {
-    latestRaceData.race_date = new Date(
-      latestRaceData.raw_date.replace(/\//g, '-'),
+    await dbConnect();
+    console.log('Connected to database.');
+
+    const result = await Race.updateOne(
+      { race_id: latestRaceData.race_id },
+      { $set: latestRaceData },
+      { upsert: true },
     );
-    delete latestRaceData.raw_date; // 不要なプロパティを削除
+
+    if (result.upsertedCount > 0) {
+      console.log('New race data was inserted.');
+    } else if (result.modifiedCount > 0) {
+      console.log('Existing race data was updated.');
+    } else {
+      console.log('Race data is already up to date.');
+    }
+  } catch (error) {
+    console.error('An error occurred:', error);
+    if (browser) {
+      await browser.close();
+      console.log('Browser closed due to an error.');
+    }
+  } finally {
+    await mongoose.connection.close();
+    console.log('Database connection closed.');
   }
+};
 
-  console.log('整形後のレース情報:', latestRaceData);
-
-  await browser.close();
-})();
+scrapeAndSave();
