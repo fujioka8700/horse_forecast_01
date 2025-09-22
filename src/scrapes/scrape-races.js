@@ -21,7 +21,7 @@ const scrapeAndSave = async () => {
     console.log('Navigating to page...');
     await page.goto(
       'https://db.netkeiba.com/?pid=race_list&word=&start_year=1975&start_mon=none&end_year=none&end_mon=none&kyori_min=&kyori_max=&sort=date&list=20',
-      { waitUntil: 'domcontentloaded', timeout: 90000 }, // 待機条件を変更し、タイムアウトを90秒に延長
+      { waitUntil: 'domcontentloaded', timeout: 90000 },
     );
 
     console.log('Waiting for selector...');
@@ -29,40 +29,61 @@ const scrapeAndSave = async () => {
       timeout: 60000,
     });
 
-    console.log('Scraping data...');
-    const latestRaceData = await page.evaluate(() => {
-      const dataRow = document.querySelector(
-        '.nk_tb_common.race_table_01 tbody tr:nth-child(2)',
+    console.log('Scraping data for all races...');
+    const racesData = await page.evaluate(() => {
+      const rows = Array.from(
+        document.querySelectorAll('.nk_tb_common.race_table_01 tbody tr'),
       );
-      if (!dataRow) return null;
+      const races = [];
+      let currentDate = '';
+      let currentVenue = '';
 
-      const columns = dataRow.querySelectorAll('td');
-      if (columns.length < 9) {
-        return null;
+      // ヘッダー行を除外してループ
+      for (const row of rows.slice(1)) {
+        const columns = Array.from(row.querySelectorAll('td'));
+        let date, venue, weather, raceNameCell, distance, trackCondition;
+
+        // rowspanを考慮して日付と開催地を決定
+        if (columns.length > 12) {
+          // 通常の行（日付セルあり）
+          date = columns[0]?.innerText.trim();
+          venue = columns[1]?.innerText.trim();
+          weather = columns[2]?.innerText.trim();
+          raceNameCell = columns[4];
+          distance = columns[6]?.innerText.trim();
+          trackCondition = columns[8]?.innerText.trim();
+          currentDate = date;
+          currentVenue = venue;
+        } else {
+          // rowspanで日付セルが省略された行
+          date = currentDate;
+          venue = currentVenue;
+          weather = columns[0]?.innerText.trim();
+          raceNameCell = columns[2];
+          distance = columns[4]?.innerText.trim();
+          trackCondition = columns[6]?.innerText.trim();
+        }
+
+        const raceLink = raceNameCell?.querySelector('a');
+        const raceHref = raceLink ? raceLink.href : '';
+        const raceIdMatch = raceHref.match(/race\/(\d+)/);
+        if (!raceIdMatch) continue; // race_idがなければスキップ
+
+        const race_id = raceIdMatch[1];
+        const turf_or_dirt = distance ? distance.charAt(0) : null;
+        const distNum = distance ? parseInt(distance.substring(1), 10) : null;
+
+        races.push({
+          race_id: race_id,
+          raw_date: date,
+          course_name: venue ? venue + '競馬場' : null,
+          distance: distNum,
+          turf_or_dirt: turf_or_dirt,
+          weather: weather,
+          track_condition: trackCondition,
+        });
       }
-
-      const raceLink = columns[4]?.querySelector('a');
-      const raceHref = raceLink ? raceLink.href : '';
-      const raceIdMatch = raceHref.match(/race\/(\d+)/);
-      const race_id = raceIdMatch ? raceIdMatch[1] : null;
-
-      const distanceStr = columns[6]?.innerText.trim();
-      const turf_or_dirt = distanceStr ? distanceStr.charAt(0) : null;
-      const distance = distanceStr
-        ? parseInt(distanceStr.substring(1), 10)
-        : null;
-
-      return {
-        race_id: race_id,
-        raw_date: columns[0]?.innerText.trim(),
-        course_name: columns[1]?.innerText
-          ? columns[1].innerText.trim() + '競馬場'
-          : null,
-        distance: distance,
-        turf_or_dirt: turf_or_dirt,
-        weather: columns[2]?.innerText.trim(),
-        track_condition: columns[8]?.innerText.trim(),
-      };
+      return races;
     });
 
     if (browser) {
@@ -70,36 +91,40 @@ const scrapeAndSave = async () => {
       console.log('Browser closed.');
     }
 
-    if (!latestRaceData || !latestRaceData.race_id) {
-      console.log('No race data found or race_id is missing.');
+    if (!racesData || racesData.length === 0) {
+      console.log('No race data found.');
       return;
     }
 
-    if (latestRaceData.raw_date) {
-      latestRaceData.race_date = new Date(
-        latestRaceData.raw_date.replace(/\//g, '-'),
-      );
-      delete latestRaceData.raw_date;
-    }
-
-    console.log('Scraped race info:', latestRaceData);
+    console.log(`Scraped ${racesData.length} races. Saving to database...`);
 
     await dbConnect();
     console.log('Connected to database.');
 
-    const result = await Race.updateOne(
-      { race_id: latestRaceData.race_id },
-      { $set: latestRaceData },
-      { upsert: true },
-    );
+    for (const raceData of racesData) {
+      if (!raceData.race_id) continue;
 
-    if (result.upsertedCount > 0) {
-      console.log('New race data was inserted.');
-    } else if (result.modifiedCount > 0) {
-      console.log('Existing race data was updated.');
-    } else {
-      console.log('Race data is already up to date.');
+      if (raceData.raw_date) {
+        raceData.race_date = new Date(raceData.raw_date.replace(/\//g, '-'));
+        delete raceData.raw_date;
+      }
+
+      const result = await Race.updateOne(
+        { race_id: raceData.race_id },
+        { $set: raceData },
+        { upsert: true },
+      );
+
+      if (result.upsertedCount > 0) {
+        console.log(` -> Inserted new race: ${raceData.race_id}`);
+      } else if (result.modifiedCount > 0) {
+        console.log(` -> Updated existing race: ${raceData.race_id}`);
+      } else {
+        // console.log(` -> Race data is already up to date: ${raceData.race_id}`);
+      }
     }
+    console.log('All race data has been processed.');
+
   } catch (error) {
     console.error('An error occurred:', error);
     if (browser) {
