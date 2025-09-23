@@ -1,6 +1,7 @@
 {
   "name": "app",
   "version": "0.1.0",
+  "type": "module",
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
@@ -9,8 +10,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "migrate-mongo": "^12.1.3",
     "mongoose": "^8.18.1",
     "next": "15.5.3",
+    "puppeteer": "^24.22.0",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
